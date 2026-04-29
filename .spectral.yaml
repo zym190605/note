@@ -1,0 +1,2 @@
+# Spectral rules for docs/openapi.yaml — run: npx @stoplight/spectral-cli lint docs/openapi.yaml
+extends: ["spectral:oas"]

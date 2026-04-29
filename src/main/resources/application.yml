@@ -1,0 +1,65 @@
+spring:
+  application.name: Note
+  datasource:
+    # 也可通过 SPRING_DATASOURCE_URL / USERNAME / PASSWORD 覆盖（推荐生产环境）。
+    # 云上：仅在安全组放行某公网 IP 时，远端连库需在策略中放行对应 IP；与同机 MySQL 用本机连接即可。
+    url: jdbc:mysql://127.0.0.1:3306/note?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: zym123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      connection-timeout: 30000
+  jpa:
+    database-platform: org.hibernate.dialect.MySQLDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    properties.hibernate:
+      format_sql: true
+      jdbc.time_zone: Asia/Shanghai
+  servlet:
+    multipart.max-file-size: 12MB
+    multipart.max-request-size: 14MB
+
+server:
+  servlet.context-path:
+  forward-headers-strategy: framework
+
+logging:
+  charset:
+    console: UTF-8
+    file: UTF-8
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %-40logger{40} : %msg%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %-40logger{40} : %msg%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}"
+  level:
+    root: INFO
+    com.cn.zym.note: INFO
+    # 减少启动与运行噪声；排查问题时再改为 DEBUG 或对单包开放
+    com.zaxxer.hikari: WARN
+    com.zaxxer.hikari.HikariDataSource: INFO
+    org.springframework.boot.autoconfigure: WARN
+    org.springframework.orm.jpa: INFO
+    org.hibernate.orm.deprecation: WARN
+    org.apache.catalina.util.LifecycleBase: WARN
+
+note:
+  trash:
+    cron: "0 0 4 * * ?"
+  security:
+    jwt:
+      issuer: YimingNote
+      access-token-secret: ${JWT_ACCESS_SECRET:PLEASE_CHANGE_ACCESS_SECRET_256BIT_MIN_CHARS____}
+      refresh-token-secret: ${JWT_REFRESH_SECRET:PLEASE_CHANGE_REFRESH_SECRET_256BIT_MIN_CHARS__}
+      access-token-ttl-seconds: 900
+      refresh-token-ttl-seconds: 86400
+      refresh-token-ttl-remember-seconds: 604800
+    password-strength: 12
+  file:
+    # 服务端落盘目录；Windows 若不是根路径请设置环境变量 NOTE_STORAGE，例如 D:/note/uploads
+    storage-dir: ${NOTE_STORAGE:/note/uploads}
+    public-base-url: ${PUBLIC_BASE_URL:http://localhost:8080}
+  export:
+    # PDF 导出中文等 CJK 字形需 TrueType 字体；留空则依赖环境默认字体，可能出现缺字，可指向本机 .ttf 如 C:/Windows/Fonts/msyh.ttc
+    pdf-font-path: ${NOTE_PDF_FONT:}

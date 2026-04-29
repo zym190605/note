@@ -1,0 +1,23 @@
+[
+  {
+    "id": "diary",
+    "name": "日记",
+    "description": "记录当天心情与小确幸",
+    "title": "日记 · （请修改为当天日期）",
+    "contentHtml": "<p><strong>日期：</strong></p><h3>今日心情</h3><p></p><h3>三件好事</h3><ol><li></li><li></li><li></li></ol><h3>明日计划</h3><ul><li></li></ul>"
+  },
+  {
+    "id": "minutes",
+    "name": "会议纪要",
+    "description": "会议主题、与会人员与决议",
+    "title": "会议纪要 · （议题）",
+    "contentHtml": "<h3>基本信息</h3><p><strong>会议时间：</strong></p><p><strong>会议地点：</strong></p><p><strong>主持人：</strong></p><p><strong>记录人：</strong></p><p><strong>参会人员：</strong></p><h3>会议议题</h3><ul><li></li></ul><h3>讨论纪要</h3><p></p><h3>决议与待办</h3><table><tbody><tr><td>事项</td><td>负责人</td><td>截止时间</td></tr></tbody></table>"
+  },
+  {
+    "id": "mistake-book",
+    "name": "错题本",
+    "description": "题目、错因与正解",
+    "title": "错题 · （科目/知识点）",
+    "contentHtml": "<h3>题目</h3><p></p><h3>我的答案</h3><p></p><h3>错因分析</h3><p></p><h3>正确解答</h3><p></p><h3>复习提醒</h3><p></p>"
+  }
+]

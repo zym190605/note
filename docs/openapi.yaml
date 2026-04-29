@@ -1,0 +1,1576 @@
+openapi: 3.0.3
+info:
+  title: 一鸣笔记记录平台 API
+  description: |
+    基于《一鸣笔记记录平台软件需求规格说明书》的后端 REST 契约（`/api/v1` 前缀）。
+
+    **通用约定**
+    - **认证**：手机号 + 密码；支持记住登录（Refresh Token；记住 me 时为 7 天长会话，具体 TTL 以服务配置为准）。
+    - **隔离**：除「公开分享只读」「认证相关」外，业务数据按当前登录用户隔离。
+    - **自动保存**：客户端可对「更新笔记」防抖；`version` / `If-Match` 用于乐观锁与冲突检测。
+
+    **扩展能力（1.1+）**
+    - **笔记导出**：`GET .../notes/{noteId}/export?format=` 下载 PDF（`pdf`）、Word（`docx`）、Markdown（`md`）。
+      - PDF 中文/CJK 渲染依赖服务端配置的 TrueType 字体路径（参见部署说明：`note.export.pdf-font-path` / 环境变量 `NOTE_PDF_FONT`）。
+    - **笔记分享**：每条笔记至多一条活跃分享链接；匿名用户通过 `token` 只读正文。
+    - **模板**：`GET .../note-templates` 返回日记、会议纪要、错题本等预设条目（服务端静态 JSON）。
+    - **主题偏好**：`UserProfile.uiTheme`、`PATCH .../users/me` 可为 `LIGHT` | `DARK` | `SYSTEM`。
+  version: 1.1.0
+
+servers:
+  - url: /api/v1
+    description: 一期统一前缀
+
+tags:
+  - name: auth
+    description: 注册、登录、令牌、登出
+  - name: users
+    description: 个人中心、密码、占用空间与统计
+  - name: notebooks
+    description: 笔记本（含默认「我的笔记」约束）
+  - name: tags
+    description: 标签
+  - name: notes
+    description: 笔记 CRUD、收藏、移动、列表（含分页与筛选）
+  - name: exports
+    description: 单篇笔记导出为文件流（PDF / Word / Markdown）
+  - name: share
+    description: 笔记公开链接（匿名只读）；与「我的笔记」内分享管理同属业务域
+  - name: templates
+    description: 新建笔记可用的预设正文模板列表
+  - name: trash
+    description: 回收站（90 天保留由服务端任务执行）
+  - name: files
+    description: 图片上传与存储占用
+  - name: search
+    description: 全局模糊搜索与筛选
+  - name: admin
+    description: 后台管理（仅管理员）
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: 用户注册
+      description: |
+        注册成功后服务端自动创建默认笔记本「我的笔记」（不可删、不可改名）。
+        手机号唯一；密码 6–16 位由前后端共同校验。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: 用户登录
+      description: |
+        rememberMe=true 时 Refresh Token 有效期 7 天；否则使用较短有效期（具体天数由服务端配置，建议文档化）。
+        登录失败区分业务码：账号不存在、密码错误（响应中不泄露用户是否存在时可统一文案，此处仍定义业务错误码供后台审计）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: 账号不存在或密码错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: 刷新访问令牌
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: 退出登录（吊销当前 Refresh Token）
+      responses:
+        '204':
+          description: 已登出
+
+  /users/me:
+    get:
+      tags: [users]
+      summary: 获取当前用户信息
+      description: 含手机号脱敏展示、昵称、头像、注册时间、深浅色主题偏好等。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [users]
+      summary: 更新个人偏好（深浅色主题）
+      description: |
+        请求体可省略或仅包含需要变更的字段。未携带的字段保持不变。
+        `uiTheme` 非法时返回 400（业务码 `BAD_THEME`）。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchMeRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/me/password:
+    patch:
+      tags: [users]
+      summary: 修改登录密码
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: 修改成功
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 原密码错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /users/me/stats:
+    get:
+      tags: [users]
+      summary: 个人中心统计（笔记总数、占用空间、配额）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserStats'
+
+  /notebooks:
+    get:
+      tags: [notebooks]
+      summary: 笔记本列表
+      description: 左侧菜单使用；每项含名下笔记数量。默认笔记本排在首位或标明 isDefault。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - items
+                  - totalCount
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notebook'
+                  totalCount:
+                    type: integer
+                    minimum: 0
+
+    post:
+      tags: [notebooks]
+      summary: 新建笔记本
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                  description: 自定义名称（不能与「我的笔记」重名时可由服务端策略决定）
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notebook'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /notebooks/{notebookId}:
+    parameters:
+      - $ref: '#/components/parameters/NotebookId'
+    patch:
+      tags: [notebooks]
+      summary: 重命名笔记本
+      description: 默认笔记本不可重命名（返回 403 或 409）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notebook'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [notebooks]
+      summary: 删除笔记本
+      description: |
+        需二次确认由前端完成；后端根据请求体执行：
+        - MIGRATE_NOTES：将笔记迁入目标笔记本后删除空笔记本
+        - DELETE_WITH_NOTES：笔记本内笔记一并进入回收站（或按产品定义）
+        默认笔记本不可删除。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteNotebookRequest'
+      responses:
+        '204':
+          description: 删除成功
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: 默认笔记本不可删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /tags:
+    get:
+      tags: [tags]
+      summary: 标签列表（含使用该标签的笔记数，可选）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tag'
+
+    post:
+      tags: [tags]
+      summary: 创建标签
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  maxLength: 50
+                color:
+                  type: string
+                  pattern: '^#([0-9A-Fa-f]{6})$'
+                  description: 可选，预留展示色
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+        '409':
+          description: 同名标签（同用户）
+
+  /tags/{tagId}:
+    parameters:
+      - $ref: '#/components/parameters/TagId'
+    patch:
+      tags: [tags]
+      summary: 重命名标签
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [tags]
+      summary: 删除标签（与笔记绑定关系解除）
+      responses:
+        '204':
+          description: 已删除
+
+  /notes:
+    get:
+      tags: [notes]
+      summary: 笔记列表
+      description: |
+        默认按修改时间倒序。用于「笔记本内列表」「标签筛选」「收藏列表」。
+        回收站列表请使用 GET /notes/trash。
+      parameters:
+        - name: notebookId
+          in: query
+          schema:
+            type: string
+          description: 限定在某笔记本下（与「全部笔记本」视图互斥时可省略）
+        - name: tagIds
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          description: 多标签 AND 筛选（任选其一可满足跨笔记本）
+        - name: favoriteOnly
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: 仅收藏笔记
+        - name: keyword
+          in: query
+          schema:
+            type: string
+          description: 可选，简单列表内过滤（完整搜索用 /search）
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteListPage'
+
+    post:
+      tags: [notes]
+      summary: 新建笔记（空白或使用当前上下文笔记本）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNoteRequest'
+      responses:
+        '201':
+          description: 创建成功
+          headers:
+            ETag:
+              description: 初始版本可用于后续 If-Match
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /notes/{noteId}:
+    parameters:
+      - $ref: '#/components/parameters/NoteId'
+    get:
+      tags: [notes]
+      summary: 笔记详情（富文本正文）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [notes]
+      summary: 更新笔记（整篇保存｜自动保存｜手动保存）
+      description: |
+        建议客户端传 If-Match: <version> 或正文带 version；版本冲突时返回 409，客户端可提示刷新或分支保存。
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateNoteRequest'
+      responses:
+        '200':
+          description: 保存成功
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteDetail'
+        '409':
+          description: 版本冲突
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictBody'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [notes]
+      summary: 删除笔记 → 回收站
+      responses:
+        '204':
+          description: 已进入回收站
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /notes/{noteId}/export:
+    parameters:
+      - $ref: '#/components/parameters/NoteId'
+    get:
+      tags: [notes, exports]
+      summary: 导出笔记（PDF / Word / Markdown）
+      description: |
+        按 `format` 返回**二进制或文本文件**；响应头含 `Content-Disposition: attachment`，`filename*` 为 UTF-8 编码的文件名（由笔记标题派生，非法路径字符会替换为 `_`）。
+
+        - **pdf**：`application/pdf`。富文本经服务端渲染为 HTML 再转 PDF；纯 Markdown 风格正文可能先被规范化为 HTML（与 Word 导出一致）。
+        - **docx / word**：`application/vnd.openxmlformats-officedocument.wordprocessingml.document`。
+        - **md / markdown**：`text/markdown; charset=utf-8`。
+
+        非法 `format` 时业务码 `BAD_FORMAT`（HTTP 400）。PDF 生成失败时业务码 `PDF_EXPORT`（HTTP 500）。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pdf, docx, md, markdown, word]
+            default: md
+          description: |
+            - `pdf`：PDF
+            - `docx` 或 `word`：Word（.docx）
+            - `md` 或 `markdown`：Markdown 文本
+      responses:
+        '200':
+          description: 文件流；`Content-Type` 与 `format` 对应；`Content-Disposition: attachment`
+          headers:
+            Content-Disposition:
+              description: 附件形式；含 RFC 5987 `filename*`
+              schema:
+                type: string
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+              schema:
+                type: string
+                format: binary
+            text/markdown:
+              schema:
+                type: string
+                example: |
+                  # 标题
+
+                  正文……
+        '400':
+          description: 参数错误（如 `BAD_FORMAT`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          description: 服务端生成文件失败（PDF：`PDF_EXPORT`；Word：`DOCX_EXPORT`；其它情况见 `message`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /notes/{noteId}/share:
+    parameters:
+      - $ref: '#/components/parameters/NoteId'
+    get:
+      tags: [notes, share]
+      summary: 查询当前笔记分享状态
+      description: 若该笔记尚未创建分享链接，返回 404（业务码 `NOT_FOUND`）。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 已启用分享
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteShareStatus'
+        '404':
+          description: 笔记不存在、无权限，或当前未创建分享
+    post:
+      tags: [notes, share]
+      summary: 生成或刷新公开分享链接（每笔记至多一条）
+      description: |
+        同一笔记再次调用会**覆盖**旧 token。`shareUrl` 由服务配置 `note.file.public-base-url`（或 `PUBLIC_BASE_URL`）与 token 拼接而成。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteShareBody'
+      responses:
+        '200':
+          description: 分享链接（含 token 与完整 URL）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteShareCreated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [notes, share]
+      summary: 关闭分享
+      description: 幂等；无分享记录时亦可返回 204。
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: 已关闭或本来无分享
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /public/shares/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema:
+          type: string
+        description: 分享创建接口返回的 `token`（URL-safe）
+    get:
+      tags: [share]
+      summary: 通过分享令牌只读查看笔记（无需登录）
+      description: 分享已过期、token 无效或原笔记已进回收站/删除时返回 404（业务码 `SHARED_NOT_FOUND`）。
+      security: []
+      responses:
+        '200':
+          description: 公开只读内容
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicSharedNote'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /note-templates:
+    get:
+      tags: [notes, templates]
+      summary: 获取通用笔记模板列表（日记、纪要、错题本等）
+      description: 模板由服务端 `classpath:templates/note-templates.json` 提供；用于「从模板新建」时填充初始 `title` 与 `contentHtml`。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NoteTemplateEntry'
+
+  /notes/{noteId}/move:
+    post:
+      tags: [notes]
+      summary: 移动笔记本
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - targetNotebookId
+              properties:
+                targetNotebookId:
+                  type: string
+      responses:
+        '204':
+          description: 移动成功
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /notes/{noteId}/favorite:
+    patch:
+      tags: [notes]
+      summary: 切换收藏状态
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - favored
+              properties:
+                favored:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  favored:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /notes/{noteId}/tags:
+    put:
+      tags: [notes]
+      summary: 重设笔记绑定的标签（全量替换）
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tagIds
+              properties:
+                tagIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tag'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /notes/trash:
+    get:
+      tags: [trash]
+      summary: 回收站列表
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrashListPage'
+
+  /notes/trash/empty:
+    delete:
+      tags: [trash]
+      summary: 清空回收站（永久删除站内全部）
+      responses:
+        '204':
+          description: 已清空
+
+  /notes/trash/{noteId}/restore:
+    post:
+      tags: [trash]
+      summary: 从回收站恢复笔记
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      responses:
+        '204':
+          description: 恢复到原笔记本或可选目标（若需增加 targetNotebookId 可二期扩展）
+
+  /notes/trash/{noteId}/permanent:
+    delete:
+      tags: [trash]
+      summary: 永久删除（回收站内）
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      responses:
+        '204':
+          description: 已永久删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /files/images:
+    post:
+      tags: [files]
+      summary: 上传笔记内图片
+      description: |
+        单文件 ≤10MB；jpg/png/gif。服务端可选压缩后再落存储。
+        成功后返回可被富文本引用的 HTTPS URL。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                noteId:
+                  type: string
+                  description: 可选；用于归因与后续清理
+      responses:
+        '201':
+          description: 上传成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageUploadResult'
+        '413':
+          description: 文件过大
+        '415':
+          description: 不支持的类型
+
+  /search:
+    get:
+      tags: [search]
+      summary: 全局搜索（标题 + 正文 + 标签）
+      description: |
+        关键词高亮由前端基于返回偏移量或通过 snippets 片段实现；或由后端返回 excerpts 中带 mark 占位符。
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 搜索关键词（模糊）
+        - name: notebookId
+          in: query
+          schema:
+            type: string
+        - name: tagId
+          in: query
+          schema:
+            type: string
+        - name: favoriteOnly
+          in: query
+          schema:
+            type: boolean
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: 游标分页（可选）
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResultPage'
+
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: 管理员查询用户列表
+      parameters:
+        - name: keyword
+          in: query
+          schema:
+            type: string
+          description: 手机号关键字
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/UserStatus'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserListPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{userId}/status:
+    patch:
+      tags: [admin]
+      summary: 启用/禁用用户
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              properties:
+                status:
+                  $ref: '#/components/schemas/UserStatus'
+      responses:
+        '204':
+          description: 已更新
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/stats:
+    get:
+      tags: [admin]
+      summary: 平台统计（总用户数、总笔记数、存储占用）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformStats'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/config:
+    get:
+      tags: [admin]
+      summary: 获取系统配置
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemConfig'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    patch:
+      tags: [admin]
+      summary: 更新系统配置（存储阈值、上传规则）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SystemConfigPatch'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemConfig'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access Token（短期）
+
+  parameters:
+    NotebookId:
+      name: notebookId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    TagId:
+      name: tagId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    NoteId:
+      name: noteId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+    PageSize:
+      name: size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    BadRequest:
+      description: 参数校验失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+
+    Unauthorized:
+      description: 未登录或令牌无效
+
+    Forbidden:
+      description: 无权限（含非管理员访问 admin）
+
+    NotFound:
+      description: 资源不存在
+
+    Conflict:
+      description: 资源冲突（如手机号已注册）
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required:
+        - phone
+        - password
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9]\d{9}$'
+          example: '13800138000'
+        password:
+          type: string
+          minLength: 6
+          maxLength: 16
+
+    LoginRequest:
+      type: object
+      required:
+        - phone
+        - password
+      properties:
+        phone:
+          type: string
+        password:
+          type: string
+        rememberMe:
+          type: boolean
+          default: false
+          description: 为 true 时 Refresh 有效期 7 天
+
+    TokenPair:
+      type: object
+      required:
+        - accessToken
+        - expiresIn
+        - refreshToken
+        - refreshExpiresIn
+      properties:
+        accessToken:
+          type: string
+        expiresIn:
+          type: integer
+          description: access 过期秒数
+        refreshToken:
+          type: string
+        refreshExpiresIn:
+          type: integer
+          description: refresh 过期秒数
+
+    AuthResponse:
+      allOf:
+        - $ref: '#/components/schemas/TokenPair'
+        - type: object
+          properties:
+            userId:
+              type: string
+
+    UserProfile:
+      type: object
+      properties:
+        userId:
+          type: string
+        phoneMasked:
+          type: string
+          example: 138****8000
+        nickname:
+          type: string
+        avatarUrl:
+          type: string
+          nullable: true
+        registeredAt:
+          type: string
+          format: date-time
+        uiTheme:
+          type: string
+          enum: [LIGHT, DARK, SYSTEM]
+          description: 前端深浅色主题偏好
+
+    PatchMeRequest:
+      type: object
+      properties:
+        uiTheme:
+          type: string
+          enum: [LIGHT, DARK, SYSTEM]
+          description: 仅当需要切换主题时传递
+
+    NoteShareBody:
+      type: object
+      properties:
+        expiresInDays:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: 从当前时刻起，在若干天后过期；省略或 null 表示**不过期**
+
+    NoteShareCreated:
+      type: object
+      properties:
+        shareUrl:
+          type: string
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    NoteShareStatus:
+      type: object
+      properties:
+        shareUrl:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    PublicSharedNote:
+      type: object
+      properties:
+        title:
+          type: string
+        contentHtml:
+          type: string
+        preview:
+          type: string
+
+    NoteTemplateEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        title:
+          type: string
+        contentHtml:
+          type: string
+
+    UserStats:
+      type: object
+      description: 所有计数字段与接口一致，以**十进制字符串**形式返回大整数，避免 JS 精度问题
+      properties:
+        noteTotal:
+          type: string
+          example: "42"
+          description: 用户名下未删除且未在回收站的笔记总数
+        storageUsedBytes:
+          type: string
+          example: "1048576"
+          description: 已占用的上传文件字节数
+        storageQuotaBytes:
+          type: string
+          example: "5368709120"
+          description: 个人存储配额（字节）；可由系统默认配置或后续运营调整
+
+    ChangePasswordRequest:
+      type: object
+      required:
+        - oldPassword
+        - newPassword
+      properties:
+        oldPassword:
+          type: string
+        newPassword:
+          type: string
+          minLength: 6
+          maxLength: 16
+
+    Notebook:
+      type: object
+      required:
+        - id
+        - name
+        - noteCount
+        - isDefault
+        - updatedAt
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        noteCount:
+          type: integer
+          minimum: 0
+        isDefault:
+          type: boolean
+          description: 为 true 时表示「我的笔记」，不可删、不可改名
+        updatedAt:
+          type: string
+          format: date-time
+
+    DeleteNotebookRequest:
+      type: object
+      required:
+        - mode
+      properties:
+        mode:
+          type: string
+          enum:
+            - MIGRATE_NOTES
+            - DELETE_WITH_NOTES
+        targetNotebookId:
+          type: string
+          description: mode=MIGRATE_NOTES 时必填
+
+    Tag:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        noteCount:
+          type: integer
+          minimum: 0
+          description: 可选
+
+    NoteListItem:
+      type: object
+      required:
+        - id
+        - title
+        - preview
+        - updatedAt
+        - notebookId
+        - favored
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        preview:
+          type: string
+          description: 纯文本摘要，用于列表展示
+        updatedAt:
+          type: string
+          format: date-time
+        notebookId:
+          type: string
+        favored:
+          type: boolean
+
+    NoteDetail:
+      allOf:
+        - $ref: '#/components/schemas/NoteListItem'
+        - type: object
+          required:
+            - contentHtml
+            - version
+            - createdAt
+          properties:
+            contentHtml:
+              type: string
+              description: 富文本 HTML 存储；或 content 对象 + format 字段，由实现选择
+            version:
+              type: integer
+              minimum: 1
+              description: 乐观锁版本，每次成功保存 +1
+            createdAt:
+              type: string
+              format: date-time
+            tags:
+              type: array
+              items:
+                $ref: '#/components/schemas/Tag'
+
+    CreateNoteRequest:
+      type: object
+      required:
+        - notebookId
+      properties:
+        notebookId:
+          type: string
+        title:
+          type: string
+          default: 无标题
+        contentHtml:
+          type: string
+          default: ''
+        tagIds:
+          type: array
+          items:
+            type: string
+
+    UpdateNoteRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        contentHtml:
+          type: string
+        notebookId:
+          type: string
+        tagIds:
+          type: array
+          items:
+            type: string
+        version:
+          type: integer
+          description: 若未使用 If-Match，可传 body.version
+
+    NoteListPage:
+      type: object
+      required:
+        - items
+        - totalCount
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoteListItem'
+        totalCount:
+          type: integer
+
+    TrashListPage:
+      type: object
+      required:
+        - items
+        - totalCount
+      properties:
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/NoteListItem'
+              - type: object
+                properties:
+                  deletedAt:
+                    type: string
+                    format: date-time
+                  expireAt:
+                    type: string
+                    format: date-time
+                    description: 90 天到期预估时间（服务端写入）
+        totalCount:
+          type: integer
+
+    ImageUploadResult:
+      type: object
+      required:
+        - fileId
+        - url
+        - sizeBytes
+        - mimeType
+      properties:
+        fileId:
+          type: string
+        url:
+          type: string
+          format: uri
+        width:
+          type: integer
+          nullable: true
+        height:
+          type: integer
+          nullable: true
+        sizeBytes:
+          type: integer
+          format: int64
+        mimeType:
+          type: string
+
+    SearchHit:
+      type: object
+      required:
+        - noteId
+        - title
+        - snippet
+      properties:
+        noteId:
+          type: string
+        title:
+          type: string
+        snippet:
+          type: string
+          description: 含关键词上下文，便于前端高亮
+        notebookId:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+        matchedFields:
+          type: array
+          items:
+            type: string
+            enum:
+              - title
+              - body
+              - tags
+
+    SearchResultPage:
+      type: object
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchHit'
+        nextCursor:
+          type: string
+          nullable: true
+
+    UserStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - DISABLED
+
+    AdminUserRow:
+      type: object
+      properties:
+        userId:
+          type: string
+        phoneMasked:
+          type: string
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        noteCount:
+          type: integer
+        storageUsedBytes:
+          type: integer
+          format: int64
+        registeredAt:
+          type: string
+          format: date-time
+
+    AdminUserListPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUserRow'
+        totalCount:
+          type: integer
+
+    PlatformStats:
+      type: object
+      properties:
+        userTotal:
+          type: integer
+        noteTotal:
+          type: integer
+        storageUsedBytes:
+          type: integer
+          format: int64
+
+    SystemConfig:
+      type: object
+      properties:
+        defaultUserQuotaBytes:
+          type: integer
+          format: int64
+        maxImageSizeBytes:
+          type: integer
+          description: 默认 10MB
+        allowedImageMimeTypes:
+          type: array
+          items:
+            type: string
+        trashRetentionDays:
+          type: integer
+          default: 90
+
+    SystemConfigPatch:
+      type: object
+      properties:
+        defaultUserQuotaBytes:
+          type: integer
+          format: int64
+        maxImageSizeBytes:
+          type: integer
+        allowedImageMimeTypes:
+          type: array
+          items:
+            type: string
+        trashRetentionDays:
+          type: integer
+
+    ConflictBody:
+      type: object
+      properties:
+        code:
+          type: string
+          example: VERSION_CONFLICT
+        message:
+          type: string
+        currentVersion:
+          type: integer
+
+    ErrorBody:
+      type: object
+      properties:
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
